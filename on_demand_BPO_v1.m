@@ -22,7 +22,7 @@ function varargout = on_demand_BPO_v1(varargin)
 
 % Edit the above text to modify the response to help on_demand_BPO_v1
 
-% Last Modified by GUIDE v2.5 19-Apr-2018 10:38:16
+% Last Modified by GUIDE v2.5 23-Apr-2018 10:34:41
 
 % Begin initialization code - DO NOT EDIT
 gui_Singleton = 1;
@@ -109,7 +109,15 @@ function PB_LoadSettings_Callback(hObject, eventdata, handles)
 % handles    structure with handles and user data (see GUIDATA)
 
 load(get(handles.ET_load_path,'String'));
-
+try
+    set(handles.ET_fast_slow_ratio_thresh,'String',struc.ET_fast_slow_ratio_thresh);
+end
+try
+    set(handles.ET_G_fast,'String',struc.ET_G_fast);
+end
+try
+    set(handles.ET_G_slow,'String',struc.ET_G_slow);
+end
 try
     set(handles.ET_n_ch_in,'String',struc.ET_n_ch_in);
 end
@@ -184,6 +192,9 @@ function PB_SaveSettings_Callback(hObject, eventdata, handles)
 
 set(handles.ET_load_path,'String',get(handles.ET_save_path,'String'));
 
+struc.ET_fast_slow_ratio_thresh=get(handles.ET_fast_slow_ratio_thresh,'String');
+struc.ET_g_fast=get(handles.ET_G_fast,'String');
+struc.ET_g_slow=get(handles.ET_G_slow,'String');
 struc.ET_n_ch_in=get(handles.ET_n_ch_in,'String');
 struc.ET_n_ch_out=get(handles.ET_n_ch_out,'String');
 struc.ET_seizure_detection_channels=get(handles.ET_seizure_detection_channels,'String');
@@ -255,6 +266,10 @@ n_ch_out = str2num(get(handles.ET_n_ch_out,'String')); % hard coded number of ou
 
 seizure_detection_ch_vec = str2num(get(handles.ET_seizure_detection_channels,'String'));% detect seizures on ACH0 and ACH2, these are BNC-2090 numbers
 
+if length(seizure_detection_ch_vec) ~= n_ch_out
+    error('length(seizure_detection_ch_vec) ~= n_ch_out')
+end
+
 addAnalogOutputChannel(s, PCI_6251_dev.ID, (1:n_ch_out)-1, 'Voltage');
 
 global stim_flag
@@ -264,6 +279,13 @@ n_ch_in = str2num(get(handles.ET_n_ch_in,'String')); % hard coded 1 input channe
 for i_ch = 1:n_ch_in % add ephys recording channels
     ch(i_ch) = addAnalogInputChannel(s,PCI_6251_dev.ID, i_ch-1, 'Voltage');
 end
+
+%%
+%%
+global n_read fast_int slow_int
+n_read = 1;
+fast_int = zeros(1,n_ch_out);
+slow_int = zeros(1,n_ch_out);
 
 %% initialize matfile
 data=zeros(1,1+n_ch_in); % column 1 is time stamps, next n_ch_in columns are the input channels, and the last n_ch_out columns are the output channels
@@ -281,11 +303,13 @@ for i_cam = 1:n_cams
     save(save_mat_path,['meta_time_cam_' num2str(i_cam)],'-nocompression','-append')
 end
 
+save(save_mat_path,'fast_int','slow_int','-nocompression','-append')
+
 clear data
 mf = matfile(save_mat_path,'Writable',true);
 
 %% add listeners
-lh1 = addlistener(s,'DataAvailable', @(src, event) Process_Plot_Save(src,event,mf, handles.A_MainPlot,n_cams,vid,seizure_detection_ch_vec) );
+lh1 = addlistener(s,'DataAvailable', @(src, event) Process_Plot_Save(src,event,mf, handles.A_MainPlot,n_cams,vid,seizure_detection_ch_vec, handles) );
 lh2 = addlistener(s,'DataRequired', @Generate_Stim_Vec);
 
 s.NotifyWhenDataAvailableExceeds = fix(fs/2); % input buffer treshold, hard coded
@@ -577,11 +601,15 @@ for i_cam = 1:n_cams
     triggerconfig(vid(i_cam), 'manual')
 end
 
-function Process_Plot_Save(src,event,mf,plot_handle,n_cams,vid, seizure_detection_ch_vec) 
+function Process_Plot_Save(src,event,mf,plot_handle,n_cams,vid, seizure_detection_ch_vec, handles) 
 
 % disp('Process_Plot_Save')
 
 global stim_flag
+
+global n_read fast_int slow_int
+
+n_read = n_read+1;
 
 
 %% log the frame timestamps
@@ -640,19 +668,52 @@ mf.data(ro+(1:r), :) = [event.TimeStamps event.Data];
 
 %% seizure detection code
 
+detect_deci = 10;
+detect_data = event.Data(1:detect_deci:end,seizure_detection_ch_vec+1); % select channels and decimate
+detect_data = detect_data - repmat(mean(detect_data,1), size(detect_data,1),1); % remove mean
 
-for i_ch = 1:length(seizure_detection_ch_vec)
-    diff_data = diff(event.Data(:,seizure_detection_ch_vec(i_ch)+1));
-    if any(diff_data(:,1)>.1)
-        if stim_flag(i_ch) == 1
-            stim_flag(i_ch) = 0;
-        elseif stim_flag(i_ch) == 0
-            stim_flag(i_ch) = 1;
-        else
-            error('stim_flag must be 1 or 0')
-        end
-    end
+%% fast/slow stdev
+detect_data_std = std(detect_data,0,1);
+G_fast = str2double(get(handles.ET_G_fast,'String'));
+G_slow = str2double(get(handles.ET_G_slow,'String'));
+if n_read == 2
+    fast_int(1,:) = detect_data_std;
+    slow_int(1,:) = detect_data_std;
+    mf.fast_int(1,:) = fast_int(1,:);
+    mf.slow_int(1,:) = slow_int(1,:);
 end
+fast_int(n_read,:) = (1-G_fast)*detect_data_std + G_fast*fast_int(n_read-1,:);
+slow_int(n_read,:) = (1-G_slow)*detect_data_std + G_slow*slow_int(n_read-1,:);
+
+mf.fast_int(n_read,:) = fast_int(n_read,:);
+mf.slow_int(n_read,:) = slow_int(n_read,:);
+
+disp('.')
+disp(['fast std = ' num2str(fast_int(n_read,:))])
+disp(['slow std = ' num2str(slow_int(n_read,:))])
+
+fast_slow_ratio_thresh = str2double(get(handles.ET_fast_slow_ratio_thresh,'String'));
+
+fast_slow_ratio = fast_int(n_read,:)./slow_int(n_read,:);
+
+disp(['fast/slow ratio = ' num2str(fast_slow_ratio)])
+
+fast_slow_ratio_trigger = fast_slow_ratio > fast_slow_ratio_thresh;
+
+stim_flag = fast_slow_ratio_trigger; % add additional logic of triggers here 
+
+% for i_ch = 1:length(seizure_detection_ch_vec)
+%     diff_data = diff(event.Data(:,seizure_detection_ch_vec(i_ch)+1));
+%     if any(diff_data(:,1)>.1)
+%         if stim_flag(i_ch) == 1
+%             stim_flag(i_ch) = 0;
+%         elseif stim_flag(i_ch) == 0
+%             stim_flag(i_ch) = 1;
+%         else
+%             error('stim_flag must be 1 or 0')
+%         end
+%     end
+% end
 
 function Generate_Stim_Vec(src, event)
 
@@ -763,6 +824,75 @@ function ET_seizure_detection_channels_Callback(hObject, eventdata, handles)
 % --- Executes during object creation, after setting all properties.
 function ET_seizure_detection_channels_CreateFcn(hObject, eventdata, handles)
 % hObject    handle to ET_seizure_detection_channels (see GCBO)
+% eventdata  reserved - to be defined in a future version of MATLAB
+% handles    empty - handles not created until after all CreateFcns called
+
+% Hint: edit controls usually have a white background on Windows.
+%       See ISPC and COMPUTER.
+if ispc && isequal(get(hObject,'BackgroundColor'), get(0,'defaultUicontrolBackgroundColor'))
+    set(hObject,'BackgroundColor','white');
+end
+
+
+
+function ET_G_fast_Callback(hObject, eventdata, handles)
+% hObject    handle to ET_G_fast (see GCBO)
+% eventdata  reserved - to be defined in a future version of MATLAB
+% handles    structure with handles and user data (see GUIDATA)
+
+% Hints: get(hObject,'String') returns contents of ET_G_fast as text
+%        str2double(get(hObject,'String')) returns contents of ET_G_fast as a double
+
+
+% --- Executes during object creation, after setting all properties.
+function ET_G_fast_CreateFcn(hObject, eventdata, handles)
+% hObject    handle to ET_G_fast (see GCBO)
+% eventdata  reserved - to be defined in a future version of MATLAB
+% handles    empty - handles not created until after all CreateFcns called
+
+% Hint: edit controls usually have a white background on Windows.
+%       See ISPC and COMPUTER.
+if ispc && isequal(get(hObject,'BackgroundColor'), get(0,'defaultUicontrolBackgroundColor'))
+    set(hObject,'BackgroundColor','white');
+end
+
+
+
+function ET_G_slow_Callback(hObject, eventdata, handles)
+% hObject    handle to ET_G_slow (see GCBO)
+% eventdata  reserved - to be defined in a future version of MATLAB
+% handles    structure with handles and user data (see GUIDATA)
+
+% Hints: get(hObject,'String') returns contents of ET_G_slow as text
+%        str2double(get(hObject,'String')) returns contents of ET_G_slow as a double
+
+
+% --- Executes during object creation, after setting all properties.
+function ET_G_slow_CreateFcn(hObject, eventdata, handles)
+% hObject    handle to ET_G_slow (see GCBO)
+% eventdata  reserved - to be defined in a future version of MATLAB
+% handles    empty - handles not created until after all CreateFcns called
+
+% Hint: edit controls usually have a white background on Windows.
+%       See ISPC and COMPUTER.
+if ispc && isequal(get(hObject,'BackgroundColor'), get(0,'defaultUicontrolBackgroundColor'))
+    set(hObject,'BackgroundColor','white');
+end
+
+
+
+function ET_fast_slow_ratio_thresh_Callback(hObject, eventdata, handles)
+% hObject    handle to ET_fast_slow_ratio_thresh (see GCBO)
+% eventdata  reserved - to be defined in a future version of MATLAB
+% handles    structure with handles and user data (see GUIDATA)
+
+% Hints: get(hObject,'String') returns contents of ET_fast_slow_ratio_thresh as text
+%        str2double(get(hObject,'String')) returns contents of ET_fast_slow_ratio_thresh as a double
+
+
+% --- Executes during object creation, after setting all properties.
+function ET_fast_slow_ratio_thresh_CreateFcn(hObject, eventdata, handles)
+% hObject    handle to ET_fast_slow_ratio_thresh (see GCBO)
 % eventdata  reserved - to be defined in a future version of MATLAB
 % handles    empty - handles not created until after all CreateFcns called
 
