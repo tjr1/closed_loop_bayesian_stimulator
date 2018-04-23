@@ -22,7 +22,7 @@ function varargout = on_demand_BPO_v1(varargin)
 
 % Edit the above text to modify the response to help on_demand_BPO_v1
 
-% Last Modified by GUIDE v2.5 23-Apr-2018 10:34:41
+% Last Modified by GUIDE v2.5 23-Apr-2018 16:37:00
 
 % Begin initialization code - DO NOT EDIT
 gui_Singleton = 1;
@@ -109,6 +109,13 @@ function PB_LoadSettings_Callback(hObject, eventdata, handles)
 % handles    structure with handles and user data (see GUIDATA)
 
 load(get(handles.ET_load_path,'String'));
+
+try
+    set(handles.ET_high_pass_filter,'String',struc.ET_high_pass_filter);
+end
+try
+    set(handles.ET_low_pass_filter,'String',struc.ET_low_pass_filter);
+end
 try
     set(handles.ET_fast_slow_ratio_thresh,'String',struc.ET_fast_slow_ratio_thresh);
 end
@@ -192,6 +199,9 @@ function PB_SaveSettings_Callback(hObject, eventdata, handles)
 
 set(handles.ET_load_path,'String',get(handles.ET_save_path,'String'));
 
+
+struc.ET_high_pass_filter=get(handles.ET_high_pass_filter,'String');
+struc.ET_low_pass_filter=get(handles.ET_low_pass_filter,'String');
 struc.ET_fast_slow_ratio_thresh=get(handles.ET_fast_slow_ratio_thresh,'String');
 struc.ET_g_fast=get(handles.ET_G_fast,'String');
 struc.ET_g_slow=get(handles.ET_G_slow,'String');
@@ -652,6 +662,7 @@ n_ch = size(data_deci,2);
 channel_spacing = 5;
 
 plot(plot_handle, time_deci, data_deci+repmat(channel_spacing*(1:n_ch), n_t_deci,1))
+hold(plot_handle, 'on')
 ylim(plot_handle,[0 channel_spacing*(n_ch+1)])
 
 data = event.Data;
@@ -669,8 +680,31 @@ mf.data(ro+(1:r), :) = [event.TimeStamps event.Data];
 %% seizure detection code
 
 detect_deci = 10;
+fs = str2double(get(handles.ET_fs,'String'));
+fs_deci = fs/detect_deci;
+dt_deci = 1/fs_deci;
+
 detect_data = event.Data(1:detect_deci:end,seizure_detection_ch_vec+1); % select channels and decimate
 detect_data = detect_data - repmat(mean(detect_data,1), size(detect_data,1),1); % remove mean
+
+n_t_detect_deci = size(detect_data,1);
+detect_time_deci = event.TimeStamps(1:detect_deci:end);
+
+%% filter data
+hp_f = str2double(get(handles.ET_high_pass_filter,'String'));
+lp_f = str2double(get(handles.ET_low_pass_filter,'String'));
+
+if hp_f ~= 0
+    [bH,aH] = butter(3,hp_f/(fs_deci/2),'high');
+    detect_data = filtfilt(bH,aH,detect_data);
+end
+if lp_f ~= 0
+    [bL,aL] = butter(3,lp_f/(fs_deci/2),'low');
+    detect_data = filtfilt(bL,aL,detect_data);
+end
+
+plot(plot_handle, detect_time_deci, detect_data+repmat(channel_spacing*(seizure_detection_ch_vec+1), n_t_detect_deci,1))
+hold(plot_handle, 'off')
 
 %% fast/slow stdev
 detect_data_std = std(detect_data,0,1);
@@ -893,6 +927,52 @@ function ET_fast_slow_ratio_thresh_Callback(hObject, eventdata, handles)
 % --- Executes during object creation, after setting all properties.
 function ET_fast_slow_ratio_thresh_CreateFcn(hObject, eventdata, handles)
 % hObject    handle to ET_fast_slow_ratio_thresh (see GCBO)
+% eventdata  reserved - to be defined in a future version of MATLAB
+% handles    empty - handles not created until after all CreateFcns called
+
+% Hint: edit controls usually have a white background on Windows.
+%       See ISPC and COMPUTER.
+if ispc && isequal(get(hObject,'BackgroundColor'), get(0,'defaultUicontrolBackgroundColor'))
+    set(hObject,'BackgroundColor','white');
+end
+
+
+
+function ET_high_pass_filter_Callback(hObject, eventdata, handles)
+% hObject    handle to ET_high_pass_filter (see GCBO)
+% eventdata  reserved - to be defined in a future version of MATLAB
+% handles    structure with handles and user data (see GUIDATA)
+
+% Hints: get(hObject,'String') returns contents of ET_high_pass_filter as text
+%        str2double(get(hObject,'String')) returns contents of ET_high_pass_filter as a double
+
+
+% --- Executes during object creation, after setting all properties.
+function ET_high_pass_filter_CreateFcn(hObject, eventdata, handles)
+% hObject    handle to ET_high_pass_filter (see GCBO)
+% eventdata  reserved - to be defined in a future version of MATLAB
+% handles    empty - handles not created until after all CreateFcns called
+
+% Hint: edit controls usually have a white background on Windows.
+%       See ISPC and COMPUTER.
+if ispc && isequal(get(hObject,'BackgroundColor'), get(0,'defaultUicontrolBackgroundColor'))
+    set(hObject,'BackgroundColor','white');
+end
+
+
+
+function ET_low_pass_filter_Callback(hObject, eventdata, handles)
+% hObject    handle to ET_low_pass_filter (see GCBO)
+% eventdata  reserved - to be defined in a future version of MATLAB
+% handles    structure with handles and user data (see GUIDATA)
+
+% Hints: get(hObject,'String') returns contents of ET_low_pass_filter as text
+%        str2double(get(hObject,'String')) returns contents of ET_low_pass_filter as a double
+
+
+% --- Executes during object creation, after setting all properties.
+function ET_low_pass_filter_CreateFcn(hObject, eventdata, handles)
+% hObject    handle to ET_low_pass_filter (see GCBO)
 % eventdata  reserved - to be defined in a future version of MATLAB
 % handles    empty - handles not created until after all CreateFcns called
 
