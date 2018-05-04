@@ -272,7 +272,11 @@ dt = 1/fs;
 s.Rate = fs;
 s.IsContinuous = true;
 
-n_ch_out = str2num(get(handles.ET_n_ch_out,'String')); % hard coded number of outputs
+global out_chunk in_chunk
+out_chunk = 3; % these are very long, 1/2 second would be better, but computation time of bayes opt is too slow to fit inside the loop
+in_chunk = 2;
+
+n_ch_out = str2num(get(handles.ET_n_ch_out,'String'));
 
 seizure_detection_ch_vec = str2num(get(handles.ET_seizure_detection_channels,'String'));% detect seizures on ACH0 and ACH2, these are BNC-2090 numbers
 
@@ -292,10 +296,21 @@ end
 
 %%
 %%
-global n_read fast_int slow_int
+global n_read fast_int slow_int Seizure_On Seizure_Off Seizure_Count Seizure_Duration stim_amp stim_freq Seizure_Start_Ind next_freq next_amp
 n_read = 1;
 fast_int = zeros(1,n_ch_out);
 slow_int = zeros(1,n_ch_out);
+Seizure_On = zeros(1,n_ch_out);
+Seizure_Off = zeros(1,n_ch_out);
+Seizure_Count = zeros(1,n_ch_out);
+Seizure_Duration = zeros(1,n_ch_out);
+Seizure_Start_Ind = zeros(1,n_ch_out);
+
+next_freq = 10*ones(1,n_ch_out); % initialize arbitrarily to 10 Hz
+next_amp = 1*ones(1,n_ch_out); % initialize arbitrarily to 1 unit
+
+set(handles.T_NextFreq,'String',num2str(next_freq));
+set(handles.T_NextAmp,'String',num2str(next_amp));
 
 %% initialize matfile
 data=zeros(1,1+n_ch_in); % column 1 is time stamps, next n_ch_in columns are the input channels, and the last n_ch_out columns are the output channels
@@ -313,17 +328,21 @@ for i_cam = 1:n_cams
     save(save_mat_path,['meta_time_cam_' num2str(i_cam)],'-nocompression','-append')
 end
 
-save(save_mat_path,'fast_int','slow_int','-nocompression','-append')
+save(save_mat_path,'fast_int','slow_int','Seizure_On','Seizure_Off','stim_flag','Seizure_Duration','-nocompression','-append')
 
 clear data
 mf = matfile(save_mat_path,'Writable',true);
 
+%% specify optimized variables
+opt_freq = optimizableVariable('frequency',[1 300]); % Hz
+opt_amp = optimizableVariable('amplitude',[-4 4]); % Volts?
+
 %% add listeners
-lh1 = addlistener(s,'DataAvailable', @(src, event) Process_Plot_Save(src,event,mf, handles.A_MainPlot,n_cams,vid,seizure_detection_ch_vec, handles) );
+lh1 = addlistener(s,'DataAvailable', @(src, event) Process_Plot_Save(src,event,mf, handles.A_MainPlot,n_cams,vid,seizure_detection_ch_vec,n_ch_out,opt_freq,opt_amp, handles) );
 lh2 = addlistener(s,'DataRequired', @Generate_Stim_Vec);
 
-s.NotifyWhenDataAvailableExceeds = fix(fs/2); % input buffer treshold, hard coded
-s.NotifyWhenScansQueuedBelow = fix(fs/3); % output buffer threshold, hard coded
+s.NotifyWhenDataAvailableExceeds = fix(fs/(1/in_chunk)); % input buffer treshold, hard coded
+s.NotifyWhenScansQueuedBelow = fix(fs/(1/(out_chunk+1))); % output buffer threshold, hard coded
 % s.NotifyWhenDataAvailableExceeds = fix(fs/5); % input buffer treshold, hard coded
 % s.NotifyWhenScansQueuedBelow = fix(fs/6); % output buffer threshold, hard coded
 
@@ -331,7 +350,7 @@ s.NotifyWhenScansQueuedBelow = fix(fs/3); % output buffer threshold, hard coded
 handles.s = s;
 
 %% buffer 2 seconds of zeros to the daq output to start with
-stim_vec_init = zeros(fix(2*fs),n_ch_out);
+stim_vec_init = zeros(fix(5*fs),n_ch_out);
 queueOutputData(s, [stim_vec_init]);
 
 %% setup video save_file and start the video
@@ -611,19 +630,18 @@ for i_cam = 1:n_cams
     triggerconfig(vid(i_cam), 'manual')
 end
 
-function Process_Plot_Save(src,event,mf,plot_handle,n_cams,vid, seizure_detection_ch_vec, handles) 
+function Process_Plot_Save(src,event,mf,plot_handle,n_cams,vid, seizure_detection_ch_vec, n_ch_out,opt_freq,opt_amp, handles) 
 
 % disp('Process_Plot_Save')
 
 global stim_flag
 
-global n_read fast_int slow_int
+global n_read fast_int slow_int Seizure_On Seizure_Off Seizure_Count Seizure_Duration stim_amp stim_freq Seizure_Start_Ind next_freq next_amp
 
 n_read = n_read+1;
 
 
 %% log the frame timestamps
-% save metadata too!
 for i_cam = 1:n_cams
     numAvail(i_cam) = vid(i_cam).FramesAvailable;
     [~, time{i_cam,1}, metadata] = getdata(vid(i_cam),numAvail(i_cam));
@@ -647,9 +665,7 @@ for i_cam = 1:n_cams
     
     eval(['mf.meta_time_cam_' num2str(i_cam) '(ro_frame_meta+(1:n_new_frames),:) = meta_mat;'])
 end
-%%
-
-% also log the data
+%% plot decimated data
 deci = 5;
 
 % MainPlot_handle = findobj('Tag', 'A_MainPlot');
@@ -665,6 +681,7 @@ plot(plot_handle, time_deci, data_deci+repmat(channel_spacing*(1:n_ch), n_t_deci
 hold(plot_handle, 'on')
 ylim(plot_handle,[0 channel_spacing*(n_ch+1)])
 
+%% save raw data
 data = event.Data;
 
 [ro, co] = size(mf,'data');
@@ -678,6 +695,7 @@ end
 mf.data(ro+(1:r), :) = [event.TimeStamps event.Data];
 
 %% seizure detection code
+% decimate and remove mean
 
 detect_deci = 10;
 fs = str2double(get(handles.ET_fs,'String'));
@@ -706,7 +724,7 @@ end
 plot(plot_handle, detect_time_deci, detect_data+repmat(channel_spacing*(seizure_detection_ch_vec+1), n_t_detect_deci,1))
 hold(plot_handle, 'off')
 
-%% fast/slow stdev
+%% fast/slow stdev detector
 detect_data_std = std(detect_data,0,1);
 G_fast = str2double(get(handles.ET_G_fast,'String'));
 G_slow = str2double(get(handles.ET_G_slow,'String'));
@@ -734,20 +752,63 @@ disp(['fast/slow ratio = ' num2str(fast_slow_ratio)])
 
 fast_slow_ratio_trigger = fast_slow_ratio > fast_slow_ratio_thresh;
 
-stim_flag = fast_slow_ratio_trigger; % add additional logic of triggers here 
+%% seizue starts
+Seizure_On(n_read,:) = fast_slow_ratio_trigger; % add additional logic of triggers here 
+mf.Seizure_On(n_read,:) = Seizure_On(n_read,:);
 
-% for i_ch = 1:length(seizure_detection_ch_vec)
-%     diff_data = diff(event.Data(:,seizure_detection_ch_vec(i_ch)+1));
-%     if any(diff_data(:,1)>.1)
-%         if stim_flag(i_ch) == 1
-%             stim_flag(i_ch) = 0;
-%         elseif stim_flag(i_ch) == 0
-%             stim_flag(i_ch) = 1;
-%         else
-%             error('stim_flag must be 1 or 0')
-%         end
-%     end
-% end
+disp(['Seizure_On = ' num2str(Seizure_On(n_read,:))])
+
+%% stim when seizure detected
+stim_flag = and(Seizure_On(n_read,:)==1, Seizure_On(n_read-1,:)==0); % only the up thresholds
+mf.stim_flag(n_read,:) = stim_flag;
+Seizure_Start_Ind(stim_flag) = n_read;
+
+%% seizure ends
+Seizure_Off(n_read,:) = and(Seizure_On(n_read,:)==0, Seizure_On(n_read-1,:)==1);
+mf.Seizure_Off(n_read,:) = Seizure_Off(n_read,:);
+
+disp(['Seizure_Off = ' num2str(Seizure_Off(n_read,:))])
+
+%% count seizures
+Seizure_Count = Seizure_Count + Seizure_Off(n_read,:);
+
+disp(['Seizure_Count = ' num2str(Seizure_Count)])
+
+%% determine seizure duration
+
+time_per_read = 0.5; % hard coded half second, should be connected to listener
+
+% Seizure_Duration stim_amp stim_freq
+for i_ch_out = 1:n_ch_out
+    if Seizure_Off(n_read,i_ch_out)==1
+        % determine seizure length
+        Seizure_Duration(Seizure_Count(1,i_ch_out),i_ch_out) = time_per_read * (n_read- Seizure_Start_Ind(1,i_ch_out));
+        mf.Seizure_Duration(Seizure_Count(1,i_ch_out),i_ch_out) = Seizure_Duration(Seizure_Count(1,i_ch_out),i_ch_out);
+        
+        stim_freq(Seizure_Count(1,i_ch_out),i_ch_out) = next_freq(1,i_ch_out);
+        stim_amp(Seizure_Count(1,i_ch_out),i_ch_out) = next_amp(1,i_ch_out);
+        
+        %% Bayes Opt for next stimulation parameters
+        InitialObjective = Seizure_Duration(1:Seizure_Count(1,i_ch_out),i_ch_out);
+        freq = stim_freq(1:Seizure_Count(1,i_ch_out),i_ch_out);
+        amp = stim_amp(1:Seizure_Count(1,i_ch_out),i_ch_out);
+        InitialX = table(freq, amp);
+        
+        res = bayesopt(@place_holder_fcn,[opt_freq, opt_amp],'InitialX',InitialX,'InitialObjective',InitialObjective, 'MaxObjectiveEvaluations', 1, 'PlotFcn', [], 'AcquisitionFunctionName', 'expected-improvement-plus', 'ExplorationRatio', .4);
+        % might need to do this in a seperate instance of matlab so that it
+        % can be asynchronous, https://www.mathworks.com/matlabcentral/answers/83051-how-to-make-two-instances-of-matlab-communicate
+        plot(res,@plotObjectiveModel) %  A_BPO_vis, would be good to make these into a video
+        
+        next_freq(1,i_ch_out) = res.NextPoint{1,1};
+        next_amp(1,i_ch_out) = res.NextPoint{1,2};
+        
+        set(handles.T_NextFreq,'String',num2str(next_freq));
+        set(handles.T_NextAmp,'String',num2str(next_amp));
+    end
+end
+
+disp('Seizure_Duration = ')
+disp(num2str(Seizure_Duration))
 
 function Generate_Stim_Vec(src, event)
 
@@ -755,11 +816,9 @@ function Generate_Stim_Vec(src, event)
 
 global stim_flag
 global fs
+global out_chunk
 
 n_ch_out = length(stim_flag);
-
-out_chunk = 1/2; % hard coded half a second
-% out_chunk = 1/6; % hard coded half a second
 
 dt = 1/fs;
 
@@ -767,7 +826,7 @@ n_t = fix(fs*out_chunk);
 
 data=zeros(n_t, n_ch_out);
 
-disp(num2str(stim_flag))
+disp(['stim flag = ' num2str(stim_flag)])
 
 ind_stim = find(stim_flag);
 
@@ -981,3 +1040,6 @@ function ET_low_pass_filter_CreateFcn(hObject, eventdata, handles)
 if ispc && isequal(get(hObject,'BackgroundColor'), get(0,'defaultUicontrolBackgroundColor'))
     set(hObject,'BackgroundColor','white');
 end
+
+function [z] = place_holder_fcn(x, y)
+z = x+y; % not actually used.
