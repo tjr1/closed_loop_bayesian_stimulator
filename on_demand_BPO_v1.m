@@ -234,6 +234,13 @@ function PB_Go_Callback(hObject, eventdata, handles)
 daqreset
 imaqreset
 
+%% 
+
+global q
+
+p = gcp();
+q = parallel.pool.PollableDataQueue;
+
 %% create save folder
 
 save_folder_base = get(handles.ET_SaveFolder,'String');
@@ -273,8 +280,8 @@ s.Rate = fs;
 s.IsContinuous = true;
 
 global out_chunk in_chunk
-out_chunk = 3; % these are very long, 1/2 second would be better, but computation time of bayes opt is too slow to fit inside the loop
-in_chunk = 2;
+out_chunk = 1; % these are very long, 1/2 second would be better, but computation time of bayes opt is too slow to fit inside the loop
+in_chunk = 1;
 
 n_ch_out = str2num(get(handles.ET_n_ch_out,'String'));
 
@@ -338,11 +345,11 @@ opt_freq = optimizableVariable('frequency',[1 300]); % Hz
 opt_amp = optimizableVariable('amplitude',[-4 4]); % Volts?
 
 %% add listeners
-lh1 = addlistener(s,'DataAvailable', @(src, event) Process_Plot_Save(src,event,mf, handles.A_MainPlot,n_cams,vid,seizure_detection_ch_vec,n_ch_out,opt_freq,opt_amp, handles) );
+lh1 = addlistener(s,'DataAvailable', @(src, event) Process_Plot_Save(src,event,mf, handles.A_MainPlot,n_cams,vid,seizure_detection_ch_vec,n_ch_out,opt_freq,opt_amp, p, handles) );
 lh2 = addlistener(s,'DataRequired', @Generate_Stim_Vec);
 
-s.NotifyWhenDataAvailableExceeds = fix(fs/(1/in_chunk)); % input buffer treshold, hard coded
-s.NotifyWhenScansQueuedBelow = fix(fs/(1/(out_chunk+1))); % output buffer threshold, hard coded
+s.NotifyWhenDataAvailableExceeds = fix(fs*in_chunk); % input buffer treshold, hard coded
+s.NotifyWhenScansQueuedBelow = fix(fs*out_chunk); % output buffer threshold, hard coded
 % s.NotifyWhenDataAvailableExceeds = fix(fs/5); % input buffer treshold, hard coded
 % s.NotifyWhenScansQueuedBelow = fix(fs/6); % output buffer threshold, hard coded
 
@@ -630,11 +637,13 @@ for i_cam = 1:n_cams
     triggerconfig(vid(i_cam), 'manual')
 end
 
-function Process_Plot_Save(src,event,mf,plot_handle,n_cams,vid, seizure_detection_ch_vec, n_ch_out,opt_freq,opt_amp, handles) 
+function Process_Plot_Save(src,event,mf,plot_handle,n_cams,vid, seizure_detection_ch_vec, n_ch_out,opt_freq,opt_amp, p, handles) 
 
 % disp('Process_Plot_Save')
 
 global stim_flag
+
+global q
 
 global n_read fast_int slow_int Seizure_On Seizure_Off Seizure_Count Seizure_Duration stim_amp stim_freq Seizure_Start_Ind next_freq next_amp
 
@@ -776,7 +785,9 @@ disp(['Seizure_Count = ' num2str(Seizure_Count)])
 
 %% determine seizure duration
 
-time_per_read = 0.5; % hard coded half second, should be connected to listener
+time_per_read = 0.5; % hard coded half second, should be connected to listenerj
+
+global f
 
 % Seizure_Duration stim_amp stim_freq
 for i_ch_out = 1:n_ch_out
@@ -794,14 +805,30 @@ for i_ch_out = 1:n_ch_out
         amp = stim_amp(1:Seizure_Count(1,i_ch_out),i_ch_out);
         InitialX = table(freq, amp);
         
-        res = bayesopt(@place_holder_fcn,[opt_freq, opt_amp],'InitialX',InitialX,'InitialObjective',InitialObjective, 'MaxObjectiveEvaluations', 1, 'PlotFcn', [], 'AcquisitionFunctionName', 'expected-improvement-plus', 'ExplorationRatio', .4);
+%         res = bayesopt(@place_holder_fcn,[opt_freq, opt_amp],'InitialX',InitialX,'InitialObjective',InitialObjective, 'MaxObjectiveEvaluations', 1, 'PlotFcn', [], 'AcquisitionFunctionName', 'expected-improvement-plus', 'ExplorationRatio', .4);
         % might need to do this in a seperate instance of matlab so that it
         % can be asynchronous, https://www.mathworks.com/matlabcentral/answers/83051-how-to-make-two-instances-of-matlab-communicate
-        plot(res,@plotObjectiveModel) %  A_BPO_vis, would be good to make these into a video
         
+%         f{1,i_ch_out} = parfeval(@BO_wrapper,0,opt_amp, InitialX, InitialObjective, q);
+        f = parfeval(@BO_wrapper,0,opt_freq, opt_amp, InitialX, InitialObjective, q);
+        
+    end
+end
+
+% for i_ch_out = 1:n_ch_out
+for i_ch_out = 1:1
+    [res, gotMsg] = poll(q, .05);
+    gotMsg=gotMsg
+
+    if gotMsg
+%         close all
+        tic
+        plot(res,@plotObjectiveModel) %  A_BPO_vis, would be good to make these into a video
+        toc
+
         next_freq(1,i_ch_out) = res.NextPoint{1,1};
         next_amp(1,i_ch_out) = res.NextPoint{1,2};
-        
+
         set(handles.T_NextFreq,'String',num2str(next_freq));
         set(handles.T_NextAmp,'String',num2str(next_amp));
     end
@@ -809,6 +836,11 @@ end
 
 disp('Seizure_Duration = ')
 disp(num2str(Seizure_Duration))
+
+function BO_wrapper(opt_freq, opt_amp, InitialX, InitialObjective, q)
+
+res = bayesopt(@place_holder_fcn,[opt_freq, opt_amp],'InitialX',InitialX,'InitialObjective',InitialObjective, 'MaxObjectiveEvaluations', 1, 'PlotFcn', [], 'AcquisitionFunctionName', 'expected-improvement-plus', 'ExplorationRatio', .4);
+send(q,res)
 
 function Generate_Stim_Vec(src, event)
 
