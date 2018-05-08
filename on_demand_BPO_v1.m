@@ -239,7 +239,8 @@ imaqreset
 global q
 
 p = gcp();
-q = parallel.pool.PollableDataQueue;
+q{1,1} = parallel.pool.PollableDataQueue;
+q{1,2} = parallel.pool.PollableDataQueue;
 
 %% create save folder
 
@@ -810,19 +811,20 @@ for i_ch_out = 1:n_ch_out
         % can be asynchronous, https://www.mathworks.com/matlabcentral/answers/83051-how-to-make-two-instances-of-matlab-communicate
         
 %         f{1,i_ch_out} = parfeval(@BO_wrapper,0,opt_amp, InitialX, InitialObjective, q);
-        f = parfeval(@BO_wrapper,0,opt_freq, opt_amp, InitialX, InitialObjective, q);
+        f(1,i_ch_out) = parfeval(@BO_wrapper,0,opt_freq, opt_amp, InitialX, InitialObjective, q{1,i_ch_out});
         
     end
 end
 
 % for i_ch_out = 1:n_ch_out
-for i_ch_out = 1:1
-    [res, gotMsg] = poll(q, .05);
+for i_ch_out = 1:n_ch_out
+    [res, gotMsg] = poll(q{1,i_ch_out}, .05);
     gotMsg=gotMsg
 
     if gotMsg
 %         close all
         tic
+        figure(i_ch_out)
         plot(res,@plotObjectiveModel) %  A_BPO_vis, would be good to make these into a video
         toc
 
@@ -837,10 +839,10 @@ end
 disp('Seizure_Duration = ')
 disp(num2str(Seizure_Duration))
 
-function BO_wrapper(opt_freq, opt_amp, InitialX, InitialObjective, q)
+function BO_wrapper(opt_freq, opt_amp, InitialX, InitialObjective, que)
 
 res = bayesopt(@place_holder_fcn,[opt_freq, opt_amp],'InitialX',InitialX,'InitialObjective',InitialObjective, 'MaxObjectiveEvaluations', 1, 'PlotFcn', [], 'AcquisitionFunctionName', 'expected-improvement-plus', 'ExplorationRatio', .4);
-send(q,res)
+send(que,res)
 
 function Generate_Stim_Vec(src, event)
 
